@@ -1,6 +1,6 @@
 """
-Weekly Cost Analysis — HR1 PMS
-Reads Summary + Daily Use PMS from Google Sheet, generates Weekly_Cost.html
+Weekly Cost Analysis — Packaging Material Dashboard (HR1 / CH1 / MU1)
+Reads Summary + Daily Use PMS from Google Sheets, generates multi-warehouse HTML.
 """
 import json, logging, re, sys
 from datetime import datetime
@@ -37,6 +37,15 @@ def get_gc():
             creds = flow.run_local_server(port=0)
         token_path.write_text(creds.to_json(), encoding="utf-8")
     return gspread.authorize(creds)
+
+
+def find_worksheet(sh, name):
+    """Find worksheet by name, ignoring leading/trailing whitespace."""
+    for ws in sh.worksheets():
+        if ws.title.strip().lower() == name.strip().lower():
+            return ws
+    available = [w.title for w in sh.worksheets()]
+    raise ValueError(f"Worksheet '{name}' not found. Available: {available}")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -174,6 +183,15 @@ def parse_daily(daily_rows):
         return [], []
 
     hdr = daily_rows[0]
+
+    # Find description column by header name; fall back to col index 1
+    desc_col = 1
+    for i, h in enumerate(hdr):
+        hl = str(h).lower().strip()
+        if "sku desc" in hl or hl == "description":
+            desc_col = i
+            break
+
     date_cols = {}  # label -> col_index
     for i, h in enumerate(hdr):
         if IS_DATE.match(str(h).strip()):
@@ -185,7 +203,7 @@ def parse_daily(daily_rows):
     for r in daily_rows[1:]:
         if len(r) < 2:
             continue
-        desc = str(r[1]).strip() if r[1] else ""
+        desc = str(r[desc_col]).strip() if desc_col < len(r) and r[desc_col] else ""
         if not desc:
             continue
 
@@ -406,6 +424,340 @@ def generate_html(enriched, week_totals, cat_week, generated_at, historical=None
         .replace("##HIST_CARDS##",    hist_cards_html)
         .replace("##CHARTJS##",       chartjs_tag)
     )
+
+
+def _compute_wh_display(enriched, week_totals, cat_week, historical, generated_at):
+    """Compute all formatted display values for one warehouse."""
+    import calendar
+
+    week_labels = [label for _, label, _ in WEEKS]
+    week_keys   = [wk    for wk,  *_    in WEEKS]
+    week_vals   = [round(week_totals[wk], 2) for wk in week_keys]
+    total_month = sum(week_vals)
+
+    top20 = sorted([m for m in enriched if m["total_cost"] > 0],
+                   key=lambda x: -x["total_cost"])[:20]
+    cats_sorted = sorted(cat_week.keys(), key=lambda c: -sum(cat_week[c].values()))
+
+    top20_json = json.dumps([
+        {"name": m["name"], "category": m["category"],
+         "unit_price": m["unit_price"], "total_cost": m["total_cost"]}
+        for m in top20
+    ])
+    all_mat_json = json.dumps([
+        {"name": m["name"], "category": m["category"],
+         "unit_price": round(m["unit_price"], 2), "tax": m["tax"],
+         "week_data": {wk: {"qty": round(v["qty"], 0), "cost": round(v["cost"], 2)}
+                       for wk, v in m["week_data"].items()},
+         "total_cost": round(m["total_cost"], 2)}
+        for m in sorted([m for m in enriched if m["total_cost"] > 0],
+                        key=lambda x: -x["total_cost"])
+    ])
+
+    days_in_month = calendar.monthrange(generated_at.year, generated_at.month)[1]
+    days_elapsed  = generated_at.day
+    mrr = (total_month / days_elapsed) * days_in_month if days_elapsed > 0 else 0
+
+    hist_list = (historical or [])[-4:]
+
+    def pct_change(new, old): return (new - old) / old * 100 if old else None
+    def pct_badge(pct):
+        if pct is None: return ""
+        arrow = "▲" if pct > 0 else "▼"
+        clr   = "#E24B4A" if pct > 0 else "#1D9E75"
+        return f'<span style="font-size:11px;color:{clr};margin-left:6px">{arrow} {abs(pct):.1f}%</span>'
+
+    hist_cards_html = ""
+    for i, (label, val) in enumerate(hist_list):
+        prev_val = hist_list[i-1][1] if i > 0 else None
+        badge    = pct_badge(pct_change(val, prev_val) if prev_val else None)
+        hist_cards_html += (
+            f'<div class="kpi" style="border:.5px solid rgba(55,138,221,0.3)">'
+            f'<label style="color:#378ADD">{label} Final</label>'
+            f'<span style="color:#378ADD">{fmt_inr(val)}</span>{badge}</div>'
+        )
+    while hist_cards_html.count('<div class="kpi"') < 4:
+        hist_cards_html += '<div class="kpi" style="opacity:0.3"><label>—</label><span>—</span></div>'
+
+    may_val_num = hist_list[-1][1] if hist_list else 0
+    jun_badge   = pct_badge(pct_change(mrr, may_val_num))
+
+    return {
+        "week_labels":     week_labels,
+        "week_keys":       week_keys,
+        "week_vals":       week_vals,
+        "total_month":     total_month,
+        "total_month_fmt": fmt_inr(total_month),
+        "cat_week":        cat_week,
+        "cats_sorted":     cats_sorted,
+        "top20_json":      top20_json,
+        "all_mat_json":    all_mat_json,
+        "mrr_fmt":         fmt_inr(mrr),
+        "mrr_detail":      f"({days_elapsed} of {days_in_month} days)",
+        "w1": fmt_inr(week_totals.get("W1", 0)),
+        "w2": fmt_inr(week_totals.get("W2", 0)),
+        "w3": fmt_inr(week_totals.get("W3", 0)),
+        "w4": fmt_inr(week_totals.get("W4", 0)),
+        "hist_cards_html": hist_cards_html,
+        "jun_badge":        jun_badge,
+    }
+
+
+def generate_multi_html(wh_results, generated_at):
+    """
+    wh_results: {wh_code: {enriched, week_totals, cat_week, historical}}
+    Returns a single HTML page with HR1 / CH1 / MU1 tab navigation.
+    """
+    chartjs_path = SCRIPT_DIR / "chart.umd.js"
+    if chartjs_path.exists():
+        chartjs_tag = f"<script>{chartjs_path.read_text(encoding='utf-8')}</script>"
+    else:
+        chartjs_tag = '<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>'
+
+    gen_time_str = generated_at.strftime("%d %b %Y, %I:%M %p")
+    wh_list      = list(wh_results.keys())
+    first_wh     = wh_list[0]
+
+    kpis = {}
+    for wh, data in wh_results.items():
+        kpis[wh] = _compute_wh_display(
+            data["enriched"], data["week_totals"], data["cat_week"],
+            data.get("historical", []), generated_at
+        )
+
+    # ── tab buttons ──────────────────────────────────────────────────────────
+    tab_buttons_html = ""
+    for wh in wh_list:
+        active = " active" if wh == first_wh else ""
+        tab_buttons_html += (
+            f'<button id="tab-{wh}" class="tab-btn{active}" '
+            f'onclick="switchTab(\'{wh}\')">{wh}</button>'
+        )
+
+    # ── per-warehouse sections ────────────────────────────────────────────────
+    sections_html = ""
+    for wh, k in kpis.items():
+        vis = "" if wh == first_wh else ' style="display:none"'
+        sections_html += (
+            f'<div id="section-{wh}" class="wh-section"{vis}>\n'
+            f'<div class="kpi-top">'
+            f'<div class="kpi-left">'
+            f'<div class="kpi accent"><label>Total Month Cost · Jun</label>'
+            f'<span>{k["total_month_fmt"]}</span>{k["jun_badge"]}</div>'
+            f'<div class="kpi" style="border:.5px solid rgba(239,159,39,0.4)">'
+            f'<label style="color:#EF9F27">MRR {k["mrr_detail"]}</label>'
+            f'<span style="color:#EF9F27">{k["mrr_fmt"]}</span></div>'
+            f'</div>'
+            f'<div class="kpi-weeks">'
+            f'<div class="kpi"><label>Week 1 · 1–7 Jun</label><span>{k["w1"]}</span></div>'
+            f'<div class="kpi"><label>Week 2 · 8–14 Jun</label><span>{k["w2"]}</span></div>'
+            f'<div class="kpi"><label>Week 3 · 15–21 Jun</label><span>{k["w3"]}</span></div>'
+            f'<div class="kpi"><label>Week 4 · 22–30 Jun</label><span>{k["w4"]}</span></div>'
+            f'</div></div>\n'
+            f'<div class="kpi-hist">{k["hist_cards_html"]}</div>\n'
+            f'<div class="two">'
+            f'<div class="card"><h2>Weekly total cost trend</h2>'
+            f'<div style="position:relative;height:260px"><canvas id="{wh}_trendChart"></canvas></div></div>'
+            f'<div class="card"><h2>Cost by category — weekly</h2>'
+            f'<div class="leg" id="{wh}_catLegend"></div>'
+            f'<div style="position:relative;height:220px"><canvas id="{wh}_catStackChart"></canvas></div></div>'
+            f'</div>\n'
+            f'<div class="card"><h2>Top 20 materials — total consumption cost (June)</h2>'
+            f'<p class="sub">Cost = qty × unit price × (1 + tax)</p>'
+            f'<div style="position:relative;height:340px"><canvas id="{wh}_top20Chart"></canvas></div></div>\n'
+            f'<div class="card"><h2>Weekly cost breakdown by material</h2>'
+            f'<p class="sub">Sorted by total cost · only materials with consumption shown</p>'
+            f'<div style="overflow-x:auto"><table class="wt">'
+            f'<thead><tr>'
+            f'<th>Material</th><th>Category</th><th class="r">Unit Price</th>'
+            f'<th class="r">W1 Qty</th><th class="r">W1 Cost</th>'
+            f'<th class="r">W2 Qty</th><th class="r">W2 Cost</th>'
+            f'<th class="r">W3 Qty</th><th class="r">W3 Cost</th>'
+            f'<th class="r">W4 Qty</th><th class="r">W4 Cost</th>'
+            f'<th class="r">Total Cost</th>'
+            f'</tr></thead><tbody id="{wh}_costTbody"></tbody>'
+            f'</table></div></div>\n'
+            f'</div>\n'
+        )
+
+    # ── JS WH_DATA object ─────────────────────────────────────────────────────
+    wh_data_parts = []
+    for wh, k in kpis.items():
+        wh_data_parts.append(
+            f'"{wh}":{{'
+            f'"week_labels":{json.dumps(k["week_labels"])},'
+            f'"week_vals":{json.dumps(k["week_vals"])},'
+            f'"week_keys":{json.dumps(k["week_keys"])},'
+            f'"cat_week":{json.dumps(k["cat_week"])},'
+            f'"cats_sorted":{json.dumps(k["cats_sorted"])},'
+            f'"top20":{k["top20_json"]},'
+            f'"all_mat":{k["all_mat_json"]}'
+            f'}}'
+        )
+    wh_data_js   = "const WH_DATA={" + ",".join(wh_data_parts) + "};"
+    first_wh_str = json.dumps(first_wh)
+
+    return (_multi_html_template()
+        .replace("##GEN_TIME##",       gen_time_str)
+        .replace("##TAB_BUTTONS##",    tab_buttons_html)
+        .replace("##SECTIONS_HTML##",  sections_html)
+        .replace("##WH_DATA_JS##",     wh_data_js)
+        .replace("##FIRST_WH##",       first_wh_str)
+        .replace("##CHARTJS##",        chartjs_tag)
+    )
+
+
+def _multi_html_template():
+    return r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta http-equiv="refresh" content="3600">
+<title>Packaging Material Dashboard — HR1 · CH1 · MU1</title>
+<style>
+:root{--bg:#161614;--bg2:#202020;--bg3:#1a1a18;--text:#e4e2dc;--text2:#8a8880;--text3:#555550;--border:rgba(255,255,255,0.10);--border2:rgba(255,255,255,0.18);--r:12px;--rs:8px;--font:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;--green:#1D9E75;--orange:#EF9F27;--red:#E24B4A;--blue:#378ADD}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font);background:var(--bg);color:var(--text);padding:1.5rem 1.75rem;min-height:100vh}
+h1{font-size:20px;font-weight:500}
+h2{font-size:13px;font-weight:500;margin:0 0 12px;color:var(--text)}
+.hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;padding:1rem 1.25rem;background:var(--bg2);border-radius:var(--r);border:.5px solid var(--border)}
+.hdr-r{font-size:12px;color:var(--text2);text-align:right;line-height:1.7}
+.tab-bar{display:flex;gap:6px;margin-bottom:1.25rem}
+.tab-btn{background:var(--bg2);border:.5px solid var(--border);color:var(--text2);padding:8px 22px;border-radius:8px;cursor:pointer;font-family:var(--font);font-size:14px;font-weight:600;letter-spacing:.03em;transition:all .15s}
+.tab-btn:hover{border-color:var(--blue);color:var(--text)}
+.tab-btn.active{background:var(--blue);border-color:var(--blue);color:#fff}
+.kpi-top{display:grid;grid-template-columns:auto 1fr;gap:10px;margin-bottom:10px;align-items:stretch}
+.kpi-left{display:flex;flex-direction:column;gap:10px;min-width:170px}
+.kpi-weeks{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.kpi-hist{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:1.25rem}
+.kpi{background:var(--bg2);border-radius:var(--rs);padding:.9rem 1rem;border:.5px solid var(--border)}
+.kpi label{font-size:11px;color:var(--text2);display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em}
+.kpi span{font-size:22px;font-weight:500}
+.kpi.accent span{color:var(--green)}
+.card{background:var(--bg2);border-radius:var(--r);padding:1rem 1.25rem;border:.5px solid var(--border);margin-bottom:1.1rem}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1.1rem}
+table.wt{width:100%;border-collapse:collapse;font-size:12px}
+table.wt th{padding:7px 10px;text-align:left;color:var(--text2);font-weight:500;border-bottom:1px solid var(--border2);white-space:nowrap}
+table.wt th.r,table.wt td.r{text-align:right}
+table.wt td{padding:6px 10px;border-bottom:.5px solid var(--border);color:var(--text)}
+table.wt tr:last-child td{border-bottom:none}
+table.wt tr:hover td{background:rgba(255,255,255,0.03)}
+.badge{display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:500}
+.leg{display:flex;flex-wrap:wrap;gap:6px 14px;margin-bottom:10px}
+.leg-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)}
+.sub{font-size:11px;color:var(--text2);margin:-8px 0 10px}
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <div>
+    <h1>Packaging Material · Weekly Cost Analysis</h1>
+    <p style="font-size:12px;color:var(--text2);margin-top:3px">June 2026</p>
+  </div>
+  <div class="hdr-r">
+    Last updated: ##GEN_TIME##<br>
+    <span style="color:var(--text3)">Auto-refreshes every hour</span>
+  </div>
+</div>
+
+<div class="tab-bar">##TAB_BUTTONS##</div>
+
+##SECTIONS_HTML##
+
+<p style="font-size:11px;color:var(--text3);text-align:center;margin-top:1.5rem;padding-top:1rem;border-top:.5px solid var(--border)">
+  Packaging Material Monitor &nbsp;·&nbsp; ##GEN_TIME## &nbsp;·&nbsp; Source: Google Sheets
+</p>
+
+##CHARTJS##
+<script>
+window.onerror=function(msg,src,line,col,err){document.body.insertAdjacentHTML('afterbegin','<div style="position:fixed;top:0;left:0;right:0;background:#E24B4A;color:#fff;padding:8px 12px;font-family:monospace;font-size:12px;z-index:9999">JS Error: '+msg+' (line '+line+')</div>');return false;};
+
+##WH_DATA_JS##
+
+const CC={"Corrugated Box":"#378ADD","Temper Proof":"#D85A30","Zipper Bag":"#1D9E75","Other":"#888780","Shrink Wrap":"#7F77DD","Thermosheet":"#BA7517","Gunny Bag":"#639922","Bubble Roll":"#E8A838"};
+
+function fmtINR(v){v=Math.round(v);if(v===0)return"₹0";let s=v.toString(),last3=s.slice(-3),rest=s.slice(0,-3),parts=[];while(rest.length>2){parts.unshift(rest.slice(-2));rest=rest.slice(0,-2);}if(rest)parts.unshift(rest);return"₹"+parts.join(",")+","+last3;}
+
+const chartsInited={};
+
+function initCharts(wh){
+  const d=WH_DATA[wh];
+
+  const legEl=document.getElementById(wh+"_catLegend");
+  if(legEl)d.cats_sorted.forEach(cat=>{
+    const s=document.createElement("span");s.className="leg-item";
+    s.innerHTML='<span style="width:8px;height:8px;border-radius:2px;background:'+(CC[cat]||"#888")+';display:inline-block"></span>'+cat;
+    legEl.appendChild(s);
+  });
+
+  try{new Chart(document.getElementById(wh+"_trendChart"),{
+    type:"bar",
+    data:{labels:d.week_labels,datasets:[{label:"Cost (₹)",data:d.week_vals,
+      backgroundColor:d.week_vals.map((_,i)=>["#378ADD","#1D9E75","#D85A30","#EF9F27"][i]||"#888"),
+      borderRadius:6,borderSkipped:false}]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>" "+fmtINR(c.parsed.y)}}},
+      scales:{x:{grid:{color:"rgba(136,135,128,0.1)"},ticks:{color:"#8a8880"}},
+              y:{grid:{color:"rgba(136,135,128,0.1)"},ticks:{color:"#8a8880",callback:v=>fmtINR(v)}}}}
+  });}catch(e){console.error(wh+"_trendChart:",e);}
+
+  try{const catDs=d.cats_sorted.map(cat=>({
+    label:cat,data:d.week_keys.map(wk=>(d.cat_week[cat]||{})[wk]||0),
+    backgroundColor:CC[cat]||"#888",borderWidth:0,borderRadius:3
+  }));
+  new Chart(document.getElementById(wh+"_catStackChart"),{
+    type:"bar",data:{labels:d.week_labels,datasets:catDs},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.dataset.label+": "+fmtINR(c.parsed.y)}}},
+      scales:{x:{stacked:true,grid:{display:false},ticks:{color:"#8a8880"}},
+              y:{stacked:true,grid:{color:"rgba(136,135,128,0.1)"},ticks:{color:"#8a8880",callback:v=>fmtINR(v)}}}}
+  });}catch(e){console.error(wh+"_catStackChart:",e);}
+
+  try{new Chart(document.getElementById(wh+"_top20Chart"),{
+    type:"bar",
+    data:{labels:d.top20.map(m=>m.name),datasets:[{data:d.top20.map(m=>m.total_cost),
+      backgroundColor:d.top20.map(m=>CC[m.category]||"#888"),borderRadius:4,borderSkipped:false}]},
+    options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>" "+fmtINR(c.parsed.x)}}},
+      scales:{x:{grid:{color:"rgba(136,135,128,0.1)"},ticks:{color:"#8a8880",callback:v=>fmtINR(v)}},
+              y:{grid:{display:false},ticks:{color:"#8a8880",font:{size:11}}}}}
+  });}catch(e){console.error(wh+"_top20Chart:",e);}
+
+  const tbody=document.getElementById(wh+"_costTbody");
+  if(tbody)d.all_mat.forEach((m,idx)=>{
+    const tr=document.createElement("tr");
+    if(idx%2===1)tr.style.background="rgba(255,255,255,0.02)";
+    const cc=CC[m.category]||"#888";
+    let cells="<td>"+m.name+"</td>";
+    cells+='<td><span class="badge" style="background:'+cc+'22;color:'+cc+'">'+m.category+"</span></td>";
+    cells+='<td class="r" style="color:var(--text2)">₹'+m.unit_price+"</td>";
+    ["W1","W2","W3","W4"].forEach(wk=>{
+      const dd=m.week_data[wk]||{qty:0,cost:0};
+      cells+='<td class="r">'+(dd.qty||"")+"</td>";
+      cells+='<td class="r" style="color:'+(dd.cost>0?"var(--text)":"var(--text3)")+'">'+
+             (dd.cost>0?fmtINR(dd.cost):"")+"</td>";
+    });
+    cells+='<td class="r" style="font-weight:500">'+fmtINR(m.total_cost)+"</td>";
+    tr.innerHTML=cells;tbody.appendChild(tr);
+  });
+}
+
+function switchTab(wh){
+  document.querySelectorAll('.wh-section').forEach(s=>s.style.display='none');
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('section-'+wh).style.display='';
+  document.getElementById('tab-'+wh).classList.add('active');
+  if(!chartsInited[wh]){initCharts(wh);chartsInited[wh]=true;}
+}
+
+initCharts(##FIRST_WH##);
+chartsInited[##FIRST_WH##]=true;
+</script>
+</body>
+</html>
+"""
 
 
 def _html_template(chartjs_tag):

@@ -1,7 +1,6 @@
 """
-HR1 Packaging Material — Weekly Cost Dashboard
-Flask web app for Render deployment.
-Serves the dashboard HTML, regenerating from Google Sheets at most once per hour.
+Packaging Material — Weekly Cost Dashboard (HR1 / CH1 / MU1)
+Flask web app. Serves multi-warehouse dashboard HTML, regenerating from Google Sheets at most once per hour.
 """
 import json, os, time, threading, logging
 from pathlib import Path
@@ -59,26 +58,49 @@ _cache = {"html": None, "generated_at": 0, "lock": threading.Lock()}
 def build_dashboard():
     import sys
     sys.path.insert(0, str(SCRIPT_DIR))
-    from weekly_cost import (get_gc, parse_prices, parse_historical, parse_daily,
-                              compute_weekly, aggregate, generate_html)
+    from weekly_cost import (get_gc, find_worksheet, parse_prices, parse_historical,
+                              parse_daily, compute_weekly, aggregate, generate_multi_html)
 
     config = get_config()
     gc = get_gc()
-    sh = gc.open_by_key(config["spreadsheet_id"])
 
-    log.info("Fetching Summary…")
-    sum_rows = sh.worksheet("Summary").get_all_values()
-    log.info("Fetching Daily Use PMS…")
-    daily_rows = sh.worksheet(config["daily_use_sheet"]).get_all_values()
+    warehouses = {
+        "HR1": {
+            "spreadsheet_id":  config["spreadsheet_id"],
+            "daily_use_sheet": config["daily_use_sheet"],
+        },
+        "CH1": {
+            "spreadsheet_id":  config["ch1_spreadsheet_id"],
+            "daily_use_sheet": config.get("ch1_daily_use_sheet", "Daily Use PMS"),
+        },
+        "MU1": {
+            "spreadsheet_id":  config["mu1_spreadsheet_id"],
+            "daily_use_sheet": config.get("mu1_daily_use_sheet", "Daily Use PMS"),
+        },
+    }
 
-    prices     = parse_prices(sum_rows)
-    historical = parse_historical(sum_rows)
-    materials, _ = parse_daily(daily_rows)
-    enriched   = compute_weekly(materials, prices)
-    week_totals, cat_week, _ = aggregate(enriched)
+    wh_results = {}
+    for wh, wcfg in warehouses.items():
+        log.info(f"Fetching {wh}…")
+        sh        = gc.open_by_key(wcfg["spreadsheet_id"])
+        sum_rows  = find_worksheet(sh, "Summary").get_all_values()
+        daily_rows = find_worksheet(sh, wcfg["daily_use_sheet"]).get_all_values()
 
-    html = generate_html(enriched, week_totals, cat_week, datetime.now(), historical)
-    log.info("Dashboard built successfully")
+        prices     = parse_prices(sum_rows)
+        historical = parse_historical(sum_rows)
+        materials, _ = parse_daily(daily_rows)
+        enriched   = compute_weekly(materials, prices)
+        week_totals, cat_week, _ = aggregate(enriched)
+
+        wh_results[wh] = {
+            "enriched":    enriched,
+            "week_totals": week_totals,
+            "cat_week":    cat_week,
+            "historical":  historical,
+        }
+
+    html = generate_multi_html(wh_results, datetime.now())
+    log.info("Multi-warehouse dashboard built successfully")
     return html
 
 
@@ -129,8 +151,17 @@ def requires_auth(f):
 @app.route("/")
 @requires_auth
 def index():
-    html = get_cached_html()
-    return Response(html, mimetype="text/html")
+    if _cache["html"] is None:
+        threading.Thread(target=get_cached_html, daemon=True).start()
+        return Response(
+            '<html><head><meta http-equiv="refresh" content="5"></head>'
+            '<body style="font-family:sans-serif;text-align:center;padding:60px">'
+            '<h2>Loading dashboard…</h2>'
+            '<p>Fetching data from Google Sheets. This page will refresh automatically.</p>'
+            '</body></html>',
+            mimetype="text/html"
+        )
+    return Response(_cache["html"], mimetype="text/html")
 
 
 @app.route("/refresh")
