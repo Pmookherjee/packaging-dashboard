@@ -1,0 +1,16 @@
+token.json
+credentials.json
+service_account.json
+config.json
+*.pyc
+__pycache__/
+venv/
+.env
+PMS_Dashboard.html
+Weekly_Cost.html
+debug_prices.py
+check_sheets.py
+check_vw.py
+read_excel.py
+read_excel2.py
+chart.umd.js

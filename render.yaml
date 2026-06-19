@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: hr1-packaging-dashboard
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --timeout 120
+    envVars:
+      - key: GOOGLE_CREDENTIALS
+        sync: false
+      - key: GOOGLE_TOKEN
+        sync: false
+      - key: SPREADSHEET_ID
+        sync: false
+      - key: DAILY_USE_SHEET
+        value: "Daily Use PMS "
+      - key: DASH_USER
+        sync: false
+      - key: DASH_PASS
+        sync: false
