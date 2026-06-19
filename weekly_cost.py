@@ -647,6 +647,11 @@ table.wt tr:hover td{background:rgba(255,255,255,0.03)}
 .leg{display:flex;flex-wrap:wrap;gap:6px 14px;margin-bottom:10px}
 .leg-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)}
 .sub{font-size:11px;color:var(--text2);margin:-8px 0 10px}
+.icon-btn{display:inline-flex;align-items:center;gap:6px;background:var(--bg2);border:.5px solid var(--border2);color:var(--text2);padding:7px 13px;border-radius:8px;cursor:pointer;font-family:var(--font);font-size:12px;font-weight:500;transition:all .15s;white-space:nowrap}
+.icon-btn:hover{border-color:var(--blue);color:var(--blue)}
+body.light{--bg:#f0efe9;--bg2:#ffffff;--bg3:#f5f4f0;--text:#1a1918;--text2:#6a6860;--text3:#a09e98;--border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14)}
+body.light .tab-btn{background:#fff}
+body.light table.wt tr:hover td{background:rgba(0,0,0,0.02)}
 </style>
 </head>
 <body>
@@ -656,9 +661,19 @@ table.wt tr:hover td{background:rgba(255,255,255,0.03)}
     <h1>Packaging Material · Weekly Cost Analysis</h1>
     <p style="font-size:12px;color:var(--text2);margin-top:3px">June 2026</p>
   </div>
-  <div class="hdr-r">
-    Last updated: ##GEN_TIME##<br>
-    <span style="color:var(--text3)">Auto-refreshes every hour</span>
+  <div class="hdr-r" style="display:flex;align-items:center;gap:10px">
+    <div style="text-align:right">
+      Last updated: ##GEN_TIME##<br>
+      <span style="color:var(--text3)">Auto-refreshes every hour</span>
+    </div>
+    <a href="/refresh" class="icon-btn" title="Refresh data now" style="text-decoration:none">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      Refresh
+    </a>
+    <button class="icon-btn" onclick="toggleTheme()" id="themeBtn" title="Toggle light/dark mode">
+      <svg id="themeIcon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      <span id="themeLabel">Light</span>
+    </button>
   </div>
 </div>
 
@@ -754,6 +769,21 @@ function switchTab(wh){
 
 initCharts(##FIRST_WH##);
 chartsInited[##FIRST_WH##]=true;
+
+// ── theme toggle ──────────────────────────────────────────────────────────────
+const moonSVG='<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>';
+const sunSVG='<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+function applyTheme(light){
+  document.body.classList.toggle('light',light);
+  document.getElementById('themeIcon').innerHTML=light?sunSVG:moonSVG;
+  document.getElementById('themeLabel').textContent=light?'Dark':'Light';
+}
+function toggleTheme(){
+  const isLight=document.body.classList.toggle('light');
+  localStorage.setItem('pmsDashTheme',isLight?'light':'dark');
+  applyTheme(isLight);
+}
+applyTheme(localStorage.getItem('pmsDashTheme')==='light');
 </script>
 </body>
 </html>
@@ -1026,22 +1056,45 @@ ALL_MAT.forEach((m,idx)=>{
 def main():
     config = json.loads((SCRIPT_DIR / "config.json").read_text(encoding="utf-8"))
 
-    log.info("Fetching data from Google Sheets…")
-    sum_rows, daily_rows = fetch_all(config)
+    warehouses = {
+        "HR1": {
+            "spreadsheet_id":  config["spreadsheet_id"],
+            "daily_use_sheet": config["daily_use_sheet"],
+        },
+        "CH1": {
+            "spreadsheet_id":  config["ch1_spreadsheet_id"],
+            "daily_use_sheet": config.get("ch1_daily_use_sheet", "Daily Use PMS"),
+        },
+        "MU1": {
+            "spreadsheet_id":  config["mu1_spreadsheet_id"],
+            "daily_use_sheet": config.get("mu1_daily_use_sheet", "Daily Use PMS"),
+        },
+    }
 
-    prices     = parse_prices(sum_rows)
-    historical = parse_historical(sum_rows)
-    materials, date_labels = parse_daily(daily_rows)
+    gc = get_gc()
+    wh_results = {}
+    for wh, wcfg in warehouses.items():
+        log.info(f"Fetching {wh}…")
+        sh         = gc.open_by_key(wcfg["spreadsheet_id"])
+        sum_rows   = find_worksheet(sh, "Summary").get_all_values()
+        daily_rows = find_worksheet(sh, wcfg["daily_use_sheet"]).get_all_values()
 
-    enriched = compute_weekly(materials, prices)
-    week_totals, cat_week, active_weeks = aggregate(enriched)
+        prices     = parse_prices(sum_rows)
+        historical = parse_historical(sum_rows)
+        materials, _ = parse_daily(daily_rows)
+        enriched   = compute_weekly(materials, prices)
+        week_totals, cat_week, _ = aggregate(enriched)
 
-    log.info("Weekly totals:")
-    for wk, label, _ in WEEKS:
-        log.info(f"  {label}: {fmt_inr(week_totals[wk])}")
-    log.info("Historical: " + ", ".join(f"{l}={fmt_inr(v)}" for l, v in historical))
+        log.info(f"  {wh} totals: " + " | ".join(
+            f"{label} {fmt_inr(week_totals[wk])}" for wk, label, _ in WEEKS))
+        wh_results[wh] = {
+            "enriched":    enriched,
+            "week_totals": week_totals,
+            "cat_week":    cat_week,
+            "historical":  historical,
+        }
 
-    html = generate_html(enriched, week_totals, cat_week, datetime.now(), historical)
+    html = generate_multi_html(wh_results, datetime.now())
     out_path = SCRIPT_DIR / "Weekly_Cost.html"
     out_path.write_text(html, encoding="utf-8")
     log.info(f"Dashboard saved → {out_path}")
