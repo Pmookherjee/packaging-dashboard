@@ -154,7 +154,8 @@ def warm_cache():
     except Exception as e:
         log.warning(f"Warm-up failed (will retry on first request): {e}")
 
-threading.Thread(target=warm_cache, daemon=True).start()
+# Warm-up disabled on PythonAnywhere (30s worker timeout too short for Sheets fetch)
+# threading.Thread(target=warm_cache, daemon=True).start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
