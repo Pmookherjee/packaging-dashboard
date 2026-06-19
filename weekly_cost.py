@@ -650,7 +650,9 @@ table.wt tr:hover td{background:rgba(255,255,255,0.03)}
 .icon-btn{display:inline-flex;align-items:center;gap:6px;background:var(--bg2);border:.5px solid var(--border2);color:var(--text2);padding:7px 13px;border-radius:8px;cursor:pointer;font-family:var(--font);font-size:12px;font-weight:500;transition:all .15s;white-space:nowrap}
 .icon-btn:hover{border-color:var(--blue);color:var(--blue)}
 body.light{--bg:#f0efe9;--bg2:#ffffff;--bg3:#f5f4f0;--text:#1a1918;--text2:#6a6860;--text3:#a09e98;--border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.14)}
-body.light .tab-btn{background:#fff}
+body.light .tab-btn{background:#fff;color:var(--text2)}
+body.light .tab-btn:hover{color:var(--text)}
+body.light .tab-btn.active{color:#fff}
 body.light table.wt tr:hover td{background:rgba(0,0,0,0.02)}
 </style>
 </head>
