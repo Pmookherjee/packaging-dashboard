@@ -109,7 +109,8 @@ def fetch_all(config):
 # ── parse Summary → price map ─────────────────────────────────────────────────
 
 def parse_prices(sum_rows):
-    """Returns dict: sku_desc -> {unit_price, tax, consumed_value}"""
+    """Returns dict keyed by BOTH sku_desc and sku_code -> {unit_price, tax, consumed_value}.
+    Dual-keying lets parse_daily match whether it reads the SKU code or description column."""
     prices = {}
     hdr = sum_rows[0] if sum_rows else []
 
@@ -120,6 +121,7 @@ def parse_prices(sum_rows):
                 return i
         return -1
 
+    c_sku   = ci("sku") if ci("sku") >= 0 else 0          # SKU code column (col 0)
     c_desc  = ci("sku desc") if ci("sku desc") >= 0 else 1
     c_price = ci("unit price") if ci("unit price") >= 0 else 5
     c_tax   = ci("tax") if ci("tax") >= 0 else 6
@@ -128,20 +130,21 @@ def parse_prices(sum_rows):
     for r in sum_rows[1:]:
         if not r or len(r) <= max(c_desc, c_price, c_tax, c_cval):
             continue
+        sku   = str(r[c_sku]).strip()
         desc  = str(r[c_desc]).strip()
         price = safe_float(r[c_price])
         tax   = safe_float(r[c_tax])
         cval  = safe_float(r[c_cval])
         if not desc:
             continue
-        if desc not in prices:
-            prices[desc] = {"unit_price": price, "tax": tax, "consumed_value": cval}
-        else:
-            # Multiple vendor rows for same SKU desc — sum consumed values,
-            # keep weighted-average price based on consumed value
-            prices[desc]["consumed_value"] += cval
-            if price > 0:
-                prices[desc]["unit_price"] = price  # use latest non-zero price
+        entry = {"unit_price": price, "tax": tax, "consumed_value": cval}
+        for key in [k for k in (desc, sku) if k]:
+            if key not in prices:
+                prices[key] = dict(entry)
+            else:
+                prices[key]["consumed_value"] += cval
+                if price > 0:
+                    prices[key]["unit_price"] = price
 
     log.info(f"Price map: {len(prices)} SKUs")
     return prices
